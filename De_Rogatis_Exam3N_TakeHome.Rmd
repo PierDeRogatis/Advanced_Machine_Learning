@@ -1,0 +1,381 @@
+---
+title: "3N Exam"
+author: "Pierluigi De Rogatis"
+date: "26/08/2022"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# QUESTION 1
+
+Firstly, I will save the AmesHousing dataset and remove all the categorical variables from it. But before doing so, I loaded the needed R packages.
+
+```{r}
+
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(gbm)
+library(keras)
+library(tfruns)
+
+ames <- AmesHousing::make_ames()
+
+ames_num <- ames[, colnames(ames)[!grepl('factor|logical|character', sapply(ames, class))], with = F]
+
+```
+
+With the caret package, I divide the dataset into a training set (70%) and a test set (30%). After that, I use the lm() function to perform an ordinary least square (OLS) regression to the training data and test its predictions on the test data. To measure the error of this model, I analyze the Root Mean Squared Error (RMSE) in the test set as a reliable estimation of the true error of the overall prediction rule. 
+
+```{r}
+
+set.seed(12345)
+index <- createDataPartition(ames_num$Sale_Price,
+                             times=1,
+                             p=0.7,
+                             list=F)
+
+train_ames <- ames_num[index,]
+test_ames <- ames_num[-index,]
+
+ols <- lm(Sale_Price ~ ., data = train_ames)
+
+summary(ols)
+
+predictions_1 <- predict(ols, newdata = test_ames)
+
+yhat_OLS <- predict(ols, newdata = test_ames)
+RMSE_OLS <- sqrt(mean((test_ames$Sale_Price - yhat_OLS)^2))
+RMSE_OLS
+
+```
+
+Finally, the Root Mean Square Error (RMSE) is the metric that evaluates the average distance between the predicted values from the model and the actual values in the validation set. According to the Validation Set Error Bound Theorem, the error in this validation set approximates the true error of the prediction rule (in this case, a linear least-square regression). In this case, its value is 33352.82. In other words, there is an average distance of 33352.82 dollars between the observed data values (house prices) and the data values predicted by this model. 
+
+
+# QUESTION 2
+
+Now, I use a principal components regression to fit the training data: 
+
+```{r}
+
+set.seed(12345)
+ctrl <- trainControl(
+  method = "cv", 
+  number = 10,
+  savePredictions = TRUE
+)
+
+grid_pcr <- expand.grid(ncomp = seq(1, 27, 1))
+
+model_pcr <- train(Sale_Price ~ .,
+                   data = train_ames, 
+                   metric = "RMSE",
+                   method = "pcr",
+                   preProcess = c("center", "scale", "pca"), 
+                   trControl = ctrl,
+                   tuneGrid = grid_pcr)
+
+num_comp <- model_pcr$bestTune[1,]
+
+paste0("The number of principal components used in the Principal Components Regression is ", num_comp)
+
+plot(model_pcr, type = "l")
+
+yhat_PCR <- predict(model_pcr, newdata = test_ames)
+RMSE_PCR <- sqrt(mean((test_ames$Sale_Price - yhat_PCR)^2))
+RMSE_PCR
+
+```
+
+Differently from the ordinary least square, the PCR uses only the principal components to run its regression analysis. For this reason, it fits a different model which implements the smallest number of principal components required to get a significant understanding of the data. Therefore, I implemented the PCs to fit the regression model using parts of the vectorized input variables rather than the input variables themselves as performed in the OLS. PCs are vectors that assign different weights to the input components summarizing common characteristics in their variance.
+
+As we can note from the graph and the trained model, the best model according to the RMSE metric is the model implementing 24 PCs. This model leads to the smallest RMSE compared to other PCR models. We should remember that while increasing the number of PCs in the regression will decrease the model's bias since it will better fit the data, it will simultaneously increase the variance since it will not perform well in the testing data (bias-variance trade-off). Therefore, limiting the number of PCs by tuning the "ncomp" hyperparameter is necessary to reduce the complexity of the regression model by maintaining only the most influential parameters. Indeed, the PCR only uses the PCs that contain the most information in the data rather than all the information to avoid overfitting since some of the information could be only noise.
+
+However, the OLS regression leads to a lower RMSE in the test data than the PCR regression and, thus, a lower estimated error for the former prediction rule. Indeed, the PCR model generated an RMSE of 36069, meaning that, on average, each house price prediction is wrong by 36069 dollars compared to their real price in the test set. Although PCR could develop better prediction abilities and performance since it fits parameters that limit redundancies, this is not the case. These results could mean that the OLS has better performance and thus lower variance (since it already has low bias). Indeed, I assume no significant redundancies in the training set because the PCR used almost all the PCs (24 out of 27). The OLS model can estimate the parameters more efficiently if its assumptions are correct. Indeed, more assumptions hold additional information regarding the unknown data-generating distribution D. The OLS assumes that the error term should only be the effect of random chance (mean zero), and there should be no correlation between the parameters themselves and the error (no multicollinearity), and there should be no heteroscedasticity (variance of the error remains the same) and no autocorrelation. 
+
+
+# QUESTION 3
+
+Now, I use an elastic net regression to fit the training data computing cross-validation by hand without the caret package:
+
+```{r}
+
+set.seed(12345)
+train_ames_scale <- train_ames %>%
+  select(-Sale_Price) %>%
+  mutate(across(.fns=function(x) {
+    (x - mean(x)) / sd(x)
+  }))
+
+test_ames_scale <- test_ames %>%
+  select(-Sale_Price) %>%
+  mutate(across(.fns=function(x) {
+    (x - mean(x)) / sd(x)
+  }))
+
+train.y <- train_ames$Sale_Price
+test.y <- test_ames$Sale_Price
+
+
+grid_enet <- expand.grid(alpha = seq(0, 1, 0.01), lambda = seq(0, 3, 0.03))
+
+k <- 10
+folds <- sample(1:k, nrow(train_ames_scale), replace = T)
+
+cv <- map(1:nrow(grid_enet), function(x) {
+  a <- grid_enet$alpha[x]
+  l <- grid_enet$lambda[x]
+  
+  for (i in 1:k) {
+    train_ames_scale.temp <- train_ames_scale[folds != i,]
+    train.y.temp <- train.y[folds != i]
+    validate.x <- train_ames_scale[folds == i,] %>% as.matrix()
+    validate.y <- train.y[folds == i]
+    
+    model <- glmnet(x = train_ames_scale.temp,
+                    y = train.y.temp,
+                    alpha = a,
+                    lambda = l)
+    
+    b <- coef(model)[,1]
+    yhat <- cbind(1,validate.x) %*% b
+    RMSE <- sqrt(mean((validate.y - yhat)^2))
+    
+    if (i == 1) {
+      coefs <- data.frame(b)
+      RMSEs <- RMSE
+    } else {
+      coefs <- cbind(coefs, data.frame(b))
+      RMSEs <- c(RMSEs, RMSE)
+    }
+  }
+  
+  return(list(results = c(RMSE=mean(RMSEs), alpha = a, lambda = l),
+              b = rowMeans(coefs)))
+  
+})
+
+min_enet <- which.min(map_dbl(cv, function(x) {
+  x$results[1]
+}))
+
+paste0("These are the values of alpha (first) and lambda (second): ", cv[[min_enet]]$results[2:3])
+
+b_enet <- cv[[min_enet]]$b
+yhat_enet <- cbind(1, as.matrix(test_ames_scale)) %*% b_enet
+RMSE_ENET <- sqrt(mean((test.y - yhat_enet)^2))
+RMSE_ENET
+
+```
+
+The elastic net is a compromise (convex combination) between the ridge and the lasso regression in the Tikhonov form. Therefore, it uses the hyperparameters alpha and lambda (both tuned by the model via cross-validation). This model is an improvement on the OLS since it trades some bias to reduce overall variance in the model, thus reducing the estimated true error of the model (in this case, RMSE). Indeed, it implements both penalties in the loss function. First, the ridge penalty shrinks the coefficients proportionally, leading to better overall prediction accuracy and a lower risk of overfitting. At the same time, the lasso penalty eliminates some of the coefficients that cannot reach determined soft thresholding since it shrinks them by a constant factor (not proportionally), thus reducing the complexity of the regression (fewer input variables in the formula), lowering the risk of overfitting.
+
+In this case, I noticed that the optimal value of alpha is 1. Therefore, this elastic net is equal to performing a Lasso Regression, thus only shrinking the coefficients proportionally without eliminating some of them. Nevertheless, we can notice a reduction in the RMSE between the elastic net (or Lasso) and the OLS models. This effect is due to the previous specifications that enabled the model to perform better by increasing the bias (the OLS is with no- or low bias according to the Gauss-Markov Theorem) to reduce the variance and, thus, the overall estimated true risk. 
+
+On the other hand and at a first glance, this model can seem quite similar in its background reasoning to the PCR. This conclusion is incorrect. Indeed, the PCR performs some of the same features of the ridge and lasso penalties, but in different contexts. The elastic net shrinks or eliminates the coefficients correlated to the input parameters themselves. Thus, some of the columns in the model are not even considered in its estimation procedure. By contrast, the PCR shrinks or eliminates the coefficients linked to the principal components. PCs are feature combinations that represent the data and its differences as efficiently as possible by ensuring no information overlaps between features. The original inputs often display significant redundancy between one another. Therefore, all the initial inputs are still used in the PCR but with different weights determined by the PC vector loadings. Thus, it shrinks the coefficients differently since each vector has different loadings that assign various influences for the input. In each component, the vector allocates different significances but never appoints a value of zero to any loading, never removing any input variable.
+
+The previous explanation describes the difference between the RMSE in the elastic net and the PCR model. In this case, the elastic net is also lower than the PCR, with an RMSE of 33064.47. This value is the lowest RMSE but is still close to the OLS value. Therefore, the elastic net (or Lasso) improves the OLS model, but not significantly. This outcome demonstrates that, more or less, the assumptions of the OLS hold regarding the unknown distribution D from which this training and test set are collected.
+
+
+# QUESTION 4
+
+Now, I will use a boosted regression tree to fit the data:
+
+```{r}
+
+set.seed(12345)
+
+gbm_grid <- expand.grid(
+  n.trees = seq(100, 500, 100),
+  learning_rate = c(0.1, 0.05, 0.01, 0.005),
+  interaction.depth = c(1, 3, 5),
+  n.minobsinnode = c(5, 10, 20, 30),
+  cv.error = NA
+)
+
+gbm_list <- list()
+
+for(i in seq_len(nrow(gbm_grid))) {
+  
+  fit <- gbm(
+    Sale_Price ~ .,
+    data = train_ames,
+    n.trees = gbm_grid$n.trees[i],
+    shrinkage = gbm_grid$learning_rate[i],
+    interaction.depth = gbm_grid$interaction.depth[i],
+    n.minobsinnode = gbm_grid$n.minobsinnode[i],
+    cv.folds = 10
+  )
+  
+  gbm_grid$best[i] <- which.min(fit$cv.error)
+  gbm_grid$cv.error[i] <- fit$cv.error[gbm_grid$best[i]]
+  
+  gbm_list[[i]] <- fit
+  
+}
+
+best_tree <- gbm_grid %>%
+  arrange(cv.error) %>%
+  head(1)
+
+best_tree
+
+yhat_tree <- predict(gbm_list[[which.min(gbm_grid$cv.error)]], test_ames)
+RMSE_TREE <- sqrt(mean((test_ames$Sale_Price - yhat_tree)^2))
+RMSE_TREE
+
+```
+
+Decision trees segment the predictor space into several simple regions. Therefore, this tree aims to create predicting regions of the Sale_Price variable based on various information provided by the data. However, implementing a simple recursive binary splitting algorithm can lead to useful predictions in the training data but poor performance in the test set. Therefore, I used the boosting method to decrease the risk of overfitting by reducing the variance of the prediction rule. Boosting is a method that slowly learns from previous trees to fit one tree. Each subsequent tree adjusts its estimation based on prior trees and the learning rate alpha (which decides how much information from the previous tree is implemented to update the current tree model function and residuals). However, I needed to tune four different parameters in the model to avoid overfitting. First, the number of trees should be checked since excessive trees can lead to overfitting, thus generating the problem I am trying to avoid in the first place. Then, the shrinkage or learning parameter lambda needs to be tuned to achieve better performance. Also, the number of splits or, i.e., the interaction depth needs to be adjusted to achieve good performance since models excessively deep (with numerous partitions) can lead again to overfitting. Finally, I also tuned the minimum number of observations in each node since they change the capacity and outcome of the tree. Indeed, leaves containing only a few observations are probably too specific to the training set and can perform poorly in the test set, leading to overfitting and increasing the error in my prediction rule.
+
+Therefore, the final tree hyperparameters are displayed and reveal the presence of 5 splits and 6 final regions or leaves, retaining a learning rate of 0.1 with 400 trees. Indeed, boosted trees do not need to be excessively deep to perform adequately since they slowly learn from previous trees' errors. 
+
+Further, the boosted tree model has the lowest RMSE, far lower than the other models. Indeed, the RMSE is 24605.17 in the test data, reducing the estimated true error in our prediction rule. Therefore, the predictions generated by this model can more correctly classify other new observations, dividing the set into 6 regions of housing prices.  
+
+
+# QUESTION 5
+
+Now, I will use a feed-forward neural network regression model to fit the data:
+
+```{r}
+
+set.seed(12345)
+x <- (model.matrix(Sale_Price ~ ., data = ames_num))
+y <- ames_num$Sale_Price
+
+n <- nrow(ames_num)
+ntest <- trunc(n * 0.3)
+testid <- sample(1:n, ntest)
+
+x_train_FNN <- (model.matrix(Sale_Price ~ ., data = train_ames))
+x_test_FNN <- (model.matrix(Sale_Price ~ ., data = test_ames))
+
+y_train_FNN <- train_ames$Sale_Price
+y_test_FNN <- test_ames$Sale_Price
+
+# From here, it is the code in another R script from which my model started:
+
+FLAGS <- flags(
+  flag_numeric("nodes1", 64),
+  flag_numeric("nodes2",64),
+  flag_numeric("nodes3",64),
+  flag_numeric("dropout1", 0.4),
+  flag_numeric("dropout2",0.3),
+  flag_numeric("dropout3", 0.2),
+  flag_string("optimizer", "rmsprop"),
+  flag_numeric("lr", 0.1)
+)
+
+model_FNN <- keras_model_sequential() %>% 
+  layer_dense(units = FLAGS$nodes1, activation = "sigmoid", input_shape = ncol(x)) %>%
+  layer_batch_normalization() %>%
+  layer_dropout(rate = FLAGS$dropout1) %>%
+  layer_dense(units = FLAGS$nodes2, activation = "sigmoid") %>%
+  layer_batch_normalization() %>%
+  layer_dropout(rate = FLAGS$dropout2) %>%
+  layer_dense(units = FLAGS$nodes3, activation = "sigmoid") %>%
+  layer_batch_normalization() %>%
+  layer_dropout(rate = FLAGS$dropout3) %>%
+  layer_dense(units = 1, activation = "linear")
+
+model_FNN %>% compile(
+  loss = "mse",
+  metrics = list("MSE"),
+  optimizer = FLAGS$optimizer
+)
+
+model_FNN %>% fit(
+  x = x_train_FNN,
+  y = y_train_FNN,
+  epochs = 1000,
+  batch_size = 128,
+  validation_data = list(x_test_FNN, y_test_FNN),
+  callbacks = list(
+    callback_early_stopping(patience = 5),
+    callback_reduce_lr_on_plateau(monitor = "MSE", factor = FLAGS$lr, verbose = 0)
+  ),
+  verbose = FALSE
+)
+
+# Until here, now it is only in the R Markdown:
+
+runs <- tuning_run("C:/Users/pierl/OneDrive/UniEssex - IR/2021-22/3N - ADVANCED MACHINE LEARNING/PROGRAMMING EXAM/question5.R",
+                   flags = list(
+                     nodes1 = c(64, 128, 256),
+                     nodes2 = c(32, 64, 128),
+                     nodes3 = c(32, 64, 128),
+                     dropout1 = c(0.2, 0.3, 0.4),
+                     dropout2 = c(0.2, 0.3, 0.4),
+                     dropout3 = c(0.2, 0.3, 0.4),
+                     optimizer = c("rmsprop", "adam"),
+                     lr = c(0.1, 0.05)
+                   ),
+                   sample = 0.05
+                   )
+
+best <- runs %>% filter(metric_val_loss == min(metric_val_loss)) %>% glimpse()
+
+best_FNN <- keras_model_sequential() %>% 
+  layer_dense(units = best$flag_nodes1, activation = "relu", input_shape = ncol(x)) %>%
+  layer_batch_normalization() %>%
+  layer_dropout(rate = best$flag_dropout1) %>%
+  layer_dense(units = best$flag_nodes2, activation = "relu") %>%
+  layer_batch_normalization() %>%
+  layer_dropout(rate = best$flag_dropout2) %>%
+  layer_dense(units = best$flag_nodes3, activation = "relu") %>%
+  layer_batch_normalization() %>%
+  layer_dropout(rate = best$flag_dropout3) %>%
+  layer_dense(units = 1, activation = "linear")
+
+best_FNN %>% compile(
+    loss = "mse",
+    metrics = list("MSE"),
+    optimizer = best$flag_optimizer
+  )
+
+best_FNN %>% fit(
+    x = x[-testid, ],
+    y = y[-testid],
+    epochs = 1000,
+    batch_size = 256,
+    callbacks = list(
+      callback_early_stopping(patience = 5),
+      callback_reduce_lr_on_plateau(monitor = "MSE", factor = best$flag_lr, verbose = 0)
+    ),
+    verbose = FALSE
+  )
+
+yhat_FNN <- predict (best_FNN , x[testid , ])
+RMSE_FNN <- sqrt(mean((y[testid] - yhat_FNN)^2))
+RMSE_FNN
+
+```
+
+Feed-Forward Neural Network (FNN) models fit the training data slowly by studying each layer. Therefore, they can generate a deeper understanding of the relationship between variables since they slowly learn through backpropagation and cutting the relationship into more stages (hidden layers). For this reason, I needed to tune different hyperparameters. Firstly, I searched for the optimal number of nodes in the various layers since they can lead to better or worse learning in the model and avoid overfitting the data. I used a three-layer model since, after running some simulations, it was the best model that avoided underfitting the training data and test data consequently. Then, I used diverse options for the dropout level after each model to regularize the data outcome from each layer. Dropout randomly sets to zero some features in a layer during training to avoid overfitting. Further, I used batch normalization after each layer to help with gradient propagation and evade overfitting. After that, I selected the best optimizer between two different algorithms: rmsprop and adam. Each optimizer is slightly different in adjusting the weights through backpropagation and can lead to better or worse prediction results. Finally, I tuned the level of adjustment in the learning rate when reaching a plateau. Indeed, this code can automatically adjust the learning rate by a factor of 0.1 or 0.05 as the loss improvement begins to stall, i.e., once the validation loss has stopped improving for more than five epochs (patience variable in the code).
+
+The model that performed best in the cross-validation error estimations used the following hyperparameters. Firstly, it utilized 128 nodes in the first hidden layer, 64 nodes in the second layer, and 128 nodes in the third layer. Further, I implemented a sigmoid rather than a ReLU (Rectified Linear Unit) activation function since, performing the same model twice, the sigmoid resulted in a better overall performance (I did not insert the code for the ReLU FNN model). Secondly, the dropout levels are 0.3, 0.2, and 0.4 for the first, second, and third hidden layers respectively. After that, the best optimizer algorithm is the adam algorithm. Finally, the adjustment in the learning rate after each plateau is 0.1. I decided on 1000 epochs and a batch size of 128 since, after running some simulations, they were the best in the test data to avoid overfitting and the most suited for my computer's capacity. 
+
+The best FNN model using the hyperparameters estimate from the grid search generated an elevated RMSE in the test data, performing badly in this case. Indeed, the FNN model generated the highest RMSE compared to the other model, with a value of 176793.6.
+
+
+# FINAL
+
+I create a table to summarize the RMSE of the various models:
+
+```{r}
+
+result <- data.frame(model = c("OLS", "PCR", "ENET", "TREE", "FNN"),
+                     RMSE = c(RMSE_OLS, RMSE_PCR, RMSE_ENET, RMSE_TREE, RMSE_FNN))
+
+result %>% arrange(RMSE)
+
+```
+
+Therefore, the model with the lowest RMSE in the test set is the Boosted Tree. The OLS and ENET are the second lowest, with almost equal RMSE estimations. This result can lead to thinking that the unknown underlying data generation distribution D is probably a Gaussian distribution. Indeed, the boosted tree assumed a Gaussian distribution and performed far better than the other models. Further, the OLS model performs quite well, demonstrating that the unknown distribution D could be a Gaussian distribution. Indeed, the OLS estimation procedure is identical to a maximum-likelihood estimation procedure in the case of the Gaussian distribution. Maximum Likelihood Estimation is a reliable methodology since maximizing the likelihood that our parameters are the correct ones in our estimation. Also, the Elastic Net model has a similar RMSE to the OLS since it shares similar assumptions. However, the ENET model adds a penalty term in the RSS minimization (in the Tikhonov form) and replaces the Gaussian distribution of the coefficients with the Laplace distribution since it is equivalent to a Lasso regression (using the absolute difference rather than the squared difference from the mean, so quite similar to the Gaussian distribution). The ENET (or Lasso in this case) is better than the OLS method but without much difference, which suggests that the Laplace distribution is not the underlying distribution in the data. Indeed, it could be that the Lasso worked better with the test data only because it implemented fewer variables and thus limited overfitting. 
